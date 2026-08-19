@@ -1,0 +1,38 @@
+{
+  "name": "dsh-local-model",
+  "version": "0.1.0",
+  "description": "Expose locally running Ollama models as DSH agent tools (local_model_list / local_model_chat / local_model_running), so the cloud LLM driving this DSH session can call local models through tool calls. Host-only, plain ESM, zero dependencies.",
+  "private": true,
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "ollama",
+    "local-llm",
+    "token-distill",
+    "ai-tools",
+    "agent"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/xiaomi-llm/dsh-local-model.git"
+  },
+  "bugs": {
+    "url": "https://github.com/xiaomi-llm/dsh-local-model/issues"
+  },
+  "homepage": "https://github.com/xiaomi-llm/dsh-local-model#readme",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "license": "MIT"
+}

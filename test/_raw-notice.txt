@@ -1,0 +1,83 @@
+   * work not yet noticed, so cached re-processing does not spam cards.
+   * Never throws into the stream path.
+   */
+  const appendProcessNotice = (options, distilled, runtime, pruneInfo) => {
+    if (runtimeCfg.distillNotice === false && pruneInfo === null) return
+    const freshIds = []
+    const marks = freshDistillMarks(options, distilled, freshIds)
+    if (marks.length === 0 && pruneInfo === null) return
+    const pruneKeyPart = pruneInfo === null ? '' : 'p|' + pruneInfo.pruneKey
+    const key = pruneKeyPart + (marks.length ? '|m|' + [...freshIds].sort().join(',') + '|' + marks.join('|') : '')
+    if (noticedIds.has(key)) return
+    const messages = options.messages ?? []
+    const agent = findAgentForMessages(ctx, runtime, messages)
+    if (agent === null) {
+      runtimeCfg.logger?.warn?.('dsh-local-model: 请求已被压缩处理，但未能定位所属会话，跳过处理通知卡片')
+      return
+    }
+    noticedIds.add(key)
+    for (const id of freshIds) noticedIds.add(id)
+    if (noticedIds.size > 400) {
+      for (const id of [...noticedIds].slice(0, 200)) noticedIds.delete(id)
+    }
+    const lines = []
+    if (pruneInfo !== null) {
+      lines.push(`⟦历史剪枝⟧ 省略 ${pruneInfo.prunedCount} 条旧消息，保留最近 ${pruneInfo.keptCount} 条，估算 ${pruneInfo.beforeTokens}→${pruneInfo.afterTokens} tokens（-${pruneInfo.pct}%）`)
+    }
+    lines.push(...marks)
+    const summary = pruneInfo !== null
+      ? `⟦历史剪枝⟧ 省略 ${pruneInfo.prunedCount} 条旧消息，保留最近 ${pruneInfo.keptCount} 条（-${pruneInfo.pct}%）` + (marks.length ? `，另 ${marks.length} 处蒸馏` : '')
+      : summarizeMarks(marks)
+    const text = '本次调用大模型的出站内容已由本地模型压缩处理（会话内原文未改动，仅发送侧被压缩）：\n' + lines.join('\n') +
+      (pruneInfo !== null ? '\n（省略的旧消息已压成摘要；需要精确细节时请用工具回查原始来源）' : '')
+    agent.session.append('user/message', {
+      id: crypto.randomUUID(),
+      role: 'user',
+      content: [{ type: 'text', text }],
+      source: { kind: 'plugin', plugin: 'local-model', form: 'notice', summary },
+    }, { surfaceOp: 'append' })
+  }
+
+  ctx.on('llm/stream', function (options, next) {
+    // Our own re-dispatched copy: continue the chain untouched.
+    if (owned.has(options)) return next()
+    const runtime = this // LlmRuntime
+    return (async function* () {
+      let distilled
+      let pruneInfo = null
+      let work = options
+      try {
+        pruneInfo = await pruneOptions(runtimeCfg, cache, options)
+        if (pruneInfo !== null) work = pruneInfo.options
+        distilled = await distillOptions(runtimeCfg, cache, work)
+      } catch (err) {
+        if (err instanceof DistillBlockError) {
+          yield {
+            type: 'finish',
+            reason: {
+              kind: 'error',
+              failure: {
+                code: 'OUTBOUND_DISTILL_BLOCKED',
+                message: `出站内容蒸馏失败且 distillOnError=block，请求未发出：${err.message}`,
+              },
+            },
+          }
+          return
+        }
+        runtimeCfg.logger?.warn?.(`dsh-local-model: 蒸馏器异常，发送原始请求（${err?.message ?? err}）`)
+        distilled = work
+      }
+      if (distilled === options && pruneInfo === null) {
+        yield* next()
+        return
+      }
+      owned.add(distilled)
+      try {
+        appendProcessNotice(work, distilled, runtime, pruneInfo)
+      } catch (err) {
+        runtimeCfg.logger?.warn?.(`dsh-local-model: 请求级处理通知追加失败（${err?.message ?? err}）`)
+      }
+      yield* runtime.stream(distilled)
+    })()
+  }, { global: true, prepend: true })
+}

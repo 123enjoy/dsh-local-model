@@ -1,0 +1,8 @@
+# dsh-local-model bundle patch: inserts the host row into the profile's
+# plugin roster. Install with
+#   dsh plugin --profile <name> add link:D:/dsh/mcp/dsh-local-model
+# The bundle patch is applied automatically on add; do NOT insert this row
+# again in the profile patch (duplicate ids crash the loader).
+- insert:
+    - id: local-model
+      name: 'dsh-local-model'

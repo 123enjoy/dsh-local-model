@@ -1,0 +1,67 @@
+巡检系统实时报告  DISTILL_TEST_MARKER_9F3K
+
+=== 环境 ===
+Node v22.19.0, pnpm 10.34.4, Windows 11, 内存 32GB
+
+=== worker 心跳日志 ===
+[INFO] worker w1 heartbeat ok, queue empty
+[INFO] worker w2 heartbeat ok, queue empty
+[INFO] worker w3 heartbeat ok, queue empty
+[INFO] worker w4 heartbeat ok, queue empty
+[INFO] worker w5 heartbeat ok, queue empty
+[INFO] worker w6 heartbeat ok, queue empty
+[INFO] worker w7 heartbeat ok, queue empty
+[INFO] worker w8 heartbeat ok, queue empty
+[INFO] worker w9 heartbeat ok, queue empty
+[INFO] worker w10 heartbeat ok, queue empty
+[INFO] worker w11 heartbeat ok, queue empty
+[INFO] worker w12 heartbeat ok, queue empty
+
+=== 关键错误 ===
+step 417: BUILD FAILED — error code E5291: native module ssh2 编译失败，缺少 OpenSSL 头文件。
+根因：构建机未安装 OpenSSL 开发包。
+修复：choco install openssl 后重跑 pnpm rebuild ssh2。
+
+=== 指标 ===
+在线 worker：12/12
+离线 worker：0
+队列积压：0 任务
+构建成功率：97.3%（近 7 天）
+平均构建时长：4 分 21 秒
+p99 构建时长：9 分 05 秒
+今日失败构建：3 个，均为 ssh2 相关（E5291）
+
+=== 结论 ===
+整体健康，唯一系统性问题是 ssh2 原生模块缺 OpenSSL 头文件导致的构建失败，
+已给出修复命令，建议在构建机执行后重跑管道验证。
+=== 重复填充段开始（用于拉长文件，无实际意义）===
+lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore
+lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore
+lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore
+lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore
+lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore
+lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore
+lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore
+lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore
+lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore
+lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore
+lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore
+lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore
+lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore
+lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore
+lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore
+lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore
+lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore
+lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore
+lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore
+lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore
+lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore
+lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore
+lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore
+lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore
+lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore
+lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore
+lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore
+lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore
+lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore
+lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore

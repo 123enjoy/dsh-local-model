@@ -1,0 +1,24 @@
+node_modules/
+*.log
+dist/
+.turbo/
+.cache/
+*.tgz
+
+# DSH runtime
+.dsh/
+*.local
+
+# Test artifacts
+test/output/
+test/cache/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
