@@ -12,6 +12,7 @@ dist/
 # Test artifacts
 test/output/
 test/cache/
+.test-distill-cache.json
 
 # OS
 .DS_Store
