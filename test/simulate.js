@@ -70,7 +70,10 @@ function cfg(over = {}) {
     pruneKeepRecent: 12,
     pruneMaxSourceChars: 12000,
     pruneMaxSummaryTokens: 2048,
-    pruneRegenEvery: 6,
+    pruneBatchSize: 12,
+    pruneChainMaxBatches: 20,
+    pruneMaxNewBlocks: 3,
+    pruneRollMargin: 1.2,
     pruneTimeoutMs: 120000,
     pruneNotice: true,
     ...over,
@@ -147,7 +150,8 @@ function longText() {
   const received = []
   const { ctx, runtime } = makeRuntime(makeAdapter(received))
   installOutboundDistiller(ctx, cfg({ distillOnError: 'block', distillModel: 'nonexistent-model:0' }))
-  const msg = { id: 'm-block', role: 'user', content: [{ type: 'text', text: longText() }] }
+  // 唯一内容：避免命中前面测试已蒸馏的 longText()（内容哈希缓存）
+  const msg = { id: 'm-block', role: 'user', content: [{ type: 'text', text: '测试5 阻断策略专用（不命中缓存）：\n' + longText() }] }
   const chunks = await drain(runtime.stream({ provider: 'cloud', model: 'x', messages: [msg] }))
   const finish = chunks.at(-1)
   assert(received.length === 0, '5a: adapter never received the request')
@@ -160,7 +164,7 @@ function longText() {
   const received = []
   const { ctx, runtime } = makeRuntime(makeAdapter(received))
   installOutboundDistiller(ctx, cfg({ distillOnError: 'pass', distillModel: 'nonexistent-model:0' }))
-  const original = longText()
+  const original = '测试6 回退策略专用（不命中缓存）：\n' + longText()
   const msg = { id: 'm-pass', role: 'user', content: [{ type: 'text', text: original }] }
   const chunks = await drain(runtime.stream({ provider: 'cloud', model: 'x', messages: [msg] }))
   assert(received.length === 1, '6a: adapter received the request despite distiller failure')
@@ -227,8 +231,9 @@ function longText() {
   const received = []
   const { ctx, runtime } = makeRuntime(makeAdapter(received))
   installOutboundDistiller(ctx, cfg({ distillBudgetMs: 1 }))
-  const a = { id: 'm-b1', role: 'user', content: [{ type: 'text', text: longText() }] }
-  const b = { id: 'm-b2', role: 'user', content: [{ type: 'text', text: longText() }] }
+  // 唯一内容：确保两条都是冷消息（不命中前面测试的内容哈希缓存）
+  const a = { id: 'm-b1', role: 'user', content: [{ type: 'text', text: '测试9 预算第一条（冷消息）：\n' + longText() }] }
+  const b = { id: 'm-b2', role: 'user', content: [{ type: 'text', text: '测试9 预算第二条（冷消息，应原文直传）：\n' + longText() }] }
   await drain(runtime.stream({ provider: 'cloud', model: 'x', messages: [a, b] }))
   const bText = received[0].messages[1].content[0].text
   assert(!bText.includes('⟦本地蒸馏'), '9a: budget-exhausted message passed through raw')
@@ -315,9 +320,9 @@ function longText() {
 
   // 10g: composes with earlier listeners — distills the upstream decision content
   {
-    // Fresh long text (unique prefix) so the session-level dedup set marked by
-    // 10b doesn't treat this as a re-read and serve the original.
-    const upstreamContent = '10g 上游决策蒸馏专用文本（保证不命中 10b 的去重集合）：\n' + longText()
+    // Fresh long text (unique prefix) so the content-level cache marked by 10b
+    // doesn't treat this as a re-read and reuse 10b's distilled bytes.
+    const upstreamContent = '10g 上游决策蒸馏专用文本（保证不命中 10b 的内容缓存）：\n' + longText()
     const upstream = { kind: 'accept', content: [{ type: 'text', text: upstreamContent }] }
     const decision = await distiller(
       { name: 'pwsh' },
@@ -341,6 +346,28 @@ function longText() {
       async () => upstream
     )
     assert(decision === upstream, '10h: failure falls back to the raw decision')
+  }
+
+  // 10i: a re-read of the SAME text reuses the identical distilled bytes (no
+  //      second local call), so the session and the cloud cache stay stable.
+  {
+    const readText = '10i 重读复用专用文本（不与其他测试共享内容）：\n' + longText()
+    const first = await distiller(
+      { name: 'pwsh' },
+      { content: [{ type: 'text', text: readText }] },
+      async () => ({ kind: 'accept' })
+    )
+    const firstText = first.content[0].text
+    assert(firstText.includes('⟦本地蒸馏'), '10i: first read is distilled')
+    const t0 = Date.now()
+    const second = await distiller(
+      { name: 'pwsh' },
+      { content: [{ type: 'text', text: readText }] },
+      async () => ({ kind: 'accept' })
+    )
+    const elapsed = Date.now() - t0
+    assert(second.content[0].text === firstText, '10i: re-read reuses the identical distilled bytes')
+    assert(elapsed < 3000, `10i: re-read skips the local call (${elapsed} ms)`)
   }
 }
 
@@ -451,7 +478,7 @@ function histLine(tag, fact) {
   {
     const received = []
     const { ctx, runtime } = makeRuntime(makeAdapter(received))
-    installOutboundDistiller(ctx, cfg({ pruneBudgetTokens: 1000, pruneKeepRecent: 2 }))
+    installOutboundDistiller(ctx, cfg({ pruneBudgetTokens: 100, pruneKeepRecent: 2 }))
     await drain(runtime.stream({ provider: 'cloud', model: 'x', messages }))
     const got = received[0].messages
     assert(got.length === 3, `15b: pruned request has summary + kept messages (got ${got.length})`)
@@ -502,11 +529,11 @@ function histLine(tag, fact) {
     assert(received[0].messages === messages, '15f: pruneEnabled:false keeps the request untouched')
   }
 
-  // 15g: prune notice card (form:'notice') reports the prune
+  // 15g: prune notice card (form:'notice') reports the per-request delta
   {
     const received = []
     const { ctx, runtime } = makeRuntime(makeAdapter(received))
-    installOutboundDistiller(ctx, cfg({ pruneBudgetTokens: 1000, pruneKeepRecent: 2 }))
+    installOutboundDistiller(ctx, cfg({ pruneBudgetTokens: 100, pruneKeepRecent: 2, distillCachePath: './.test-prune-notice.json' }))
     const agent = makeFakeAgent(['p-keep-2'])
     ctx.agents = { list: () => [agent] }
     await drain(runtime.stream({ provider: 'cloud', model: 'x', messages }))
@@ -514,44 +541,85 @@ function histLine(tag, fact) {
     const notice = agent.appended.find((a) => a.type === 'user/message' && a.data?.source?.form === 'notice')
     assert(notice !== undefined, '15g: notice is a user/message with form:notice')
     assert(typeof notice.data.source.summary === 'string' && notice.data.source.summary.startsWith('⟦历史剪枝'), '15g: notice summary reports the prune')
-    assert(notice.data.content[0].text.includes('省略 4 条旧消息'), '15g: notice body carries prune details')
+    assert(notice.data.source.summary.includes('本轮压缩 4 条'), '15g: notice row reports the per-request delta (not cumulative)')
+    assert(notice.data.content[0].text.includes('覆盖 4 条'), '15g: notice body shows the history chain coverage')
   }
 
-  // 15h: snapshot batching — pruned set growing by fewer than pruneRegenEvery
-  // messages reuses the summary (no local call) and keeps one notice key.
+  // 15h: frozen chain — growing the pruned set APPENDS a new block and never
+  // rewrites earlier blocks, so the outbound request keeps a byte-stable prefix
+  // that the cloud provider's prompt cache keeps hitting on.
   {
     const received = []
     const { ctx, runtime } = makeRuntime(makeAdapter(received))
-    installOutboundDistiller(ctx, cfg({ pruneBudgetTokens: 1000, pruneKeepRecent: 2, pruneRegenEvery: 6 }))
-    await drain(runtime.stream({ provider: 'cloud', model: 'x', messages }))
-    const firstSummary = received[0].messages[0].content[0].text
-    // grow the history by one message: pruned set grows by 1 (< regenEvery)
-    const grownMessages = [...messages, { id: 'p-keep-3', role: 'user', content: [{ type: 'text', text: '最新一轮的消息，仍在预算边缘。' }] }]
-    const t0 = Date.now()
-    await drain(runtime.stream({ provider: 'cloud', model: 'x', messages: grownMessages }))
-    const elapsed = Date.now() - t0
-    assert(received.length === 2, '15h: second request was sent')
-    assert(received[1].messages.length === 3, '15h: grown request is still pruned to summary + kept')
-    assert(received[1].messages[0].content[0].text === firstSummary, '15h: stale-batch reuses the exact summary text')
-    assert(elapsed < 3000, `15h: stale-batch reuse skips the local call (${elapsed} ms)`)
-  }
-
-  // 15i: pruneRegenEvery reached → the summary is regenerated (new text)
-  {
-    const received = []
-    const { ctx, runtime } = makeRuntime(makeAdapter(received))
-    installOutboundDistiller(ctx, cfg({ pruneBudgetTokens: 1000, pruneKeepRecent: 2, pruneRegenEvery: 2 }))
-    await drain(runtime.stream({ provider: 'cloud', model: 'x', messages }))
-    const firstSummary = received[0].messages[0].content[0].text
-    const grown = [...messages, { id: 'p-keep-4', role: 'user', content: [{ type: 'text', text: '又一轮新消息。' }] }]
+    installOutboundDistiller(ctx, cfg({ pruneBudgetTokens: 100, pruneKeepRecent: 2, distillCachePath: './.test-prune-chain.json' }))
+    const longMsg = (id, tag) => ({ id, role: 'user', content: [{ type: 'text', text: histLine(tag, `链测试事实 ${tag}`) }] })
+    const m = [longMsg('c-o1', '1'), longMsg('c-o2', '2'), longMsg('c-o3', '3'), longMsg('c-o4', '4'), longMsg('c-k1', '5'), longMsg('c-k2', '6')]
+    await drain(runtime.stream({ provider: 'cloud', model: 'x', messages: m }))
+    assert(received[0].messages.length === 3, `15h: rebuild → 1 block + kept (got ${received[0].messages.length})`)
+    const b0 = received[0].messages[0].content[0].text
+    assert(b0.startsWith('⟦历史剪枝'), '15h: first message is the initial prune block')
+    // grow by one long message → c-k1 rolls off into a NEW appended block
+    const grown = [...m, longMsg('c-k3', '7')]
     await drain(runtime.stream({ provider: 'cloud', model: 'x', messages: grown }))
-    // grown by 1 with regenEvery 2 → still < 2 → reuse
-    assert(received[1].messages[0].content[0].text === firstSummary, '15i: below regenEvery reuses')
-    const grown2 = [...grown, { id: 'p-keep-5', role: 'user', content: [{ type: 'text', text: '再一轮新消息。' }] }]
-    await drain(runtime.stream({ provider: 'cloud', model: 'x', messages: grown2 }))
-    // grown by 2 since snapshot → regenerate → summary text should differ (marker stats differ)
-    assert(received[2].messages[0].content[0].text !== firstSummary, '15i: regenEvery crossed regenerates the summary')
+    assert(received[1].messages.length === 4, `15h: roll appends a 2nd block (got ${received[1].messages.length})`)
+    assert(received[1].messages[0].content[0].text === b0, '15h: earlier block stays byte-identical (cached prefix)')
+    assert(received[1].messages[1].content[0].text.startsWith('⟦历史剪枝'), '15h: 2nd message is the newly-rolled block')
+    assert(received[1].messages[1].content[0].text !== b0, '15h: new block differs from the first')
+    assert(received[1].messages[2].id === 'c-k2' && received[1].messages[3].id === 'c-k3', '15h: recent messages stay intact')
   }
+
+  // 15i: deep compaction — a chain past pruneChainMaxBatches merges into one
+  // block (the one rare full-chain rewrite that bounds the chain's size).
+  {
+    const received = []
+    const { ctx, runtime } = makeRuntime(makeAdapter(received))
+    installOutboundDistiller(ctx, cfg({ pruneBudgetTokens: 100, pruneKeepRecent: 2, pruneBatchSize: 1, pruneChainMaxBatches: 2, distillCachePath: './.test-prune-compact.json' }))
+    const longMsg = (id, tag) => ({ id, role: 'user', content: [{ type: 'text', text: histLine(tag, `压缩测试事实 ${tag}`) }] })
+    const m = [longMsg('co1', '1'), longMsg('co2', '2'), longMsg('co3', '3'), longMsg('co4', '4'), longMsg('ck1', '5'), longMsg('ck2', '6')]
+    await drain(runtime.stream({ provider: 'cloud', model: 'x', messages: m }))
+    assert(received[0].messages.length === 3, '15i: rebuild → 1 block + kept')
+    const g1 = [...m, longMsg('ck3', '7')]
+    await drain(runtime.stream({ provider: 'cloud', model: 'x', messages: g1 }))
+    assert(received[1].messages.length === 4, `15i: roll 1 → 2 blocks (got ${received[1].messages.length})`)
+    const g2 = [...g1, longMsg('ck4', '8')]
+    await drain(runtime.stream({ provider: 'cloud', model: 'x', messages: g2 }))
+    assert(received[2].messages.length === 3, `15i: chain past maxBatches → deep compaction to 1 block (got ${received[2].messages.length})`)
+    assert(received[2].messages[0].content[0].text.startsWith('⟦历史剪枝'), '15i: compacted first message is still a prune block')
+    assert(received[2].messages[0].content[0].text !== received[1].messages[0].content[0].text, '15i: compacted block differs from the pre-roll first block')
+    assert(received[2].messages[1].id === 'ck3' && received[2].messages[2].id === 'ck4', '15i: recent messages stay intact after compaction')
+  }
+}
+
+// --- 16. billed-content accounting: the estimator counts reasoning_content
+//         (on tool-call turns ONLY — the deepseek adapter drops it otherwise)
+//         and tool-call arguments, matching what dsh-llm-deepseek actually puts
+//         on the wire and what DSH's own dsh-token-meter bills. Regression: the
+//         old text-only walk read ~20% low on real agentic sessions (deepseek
+//         thinking + tool calls are invisible to it), so the prune budget fired
+//         late and the real request ran past the plugin's estimate. ---
+{
+  const { estimateMessagesTokens } = await import('../lib/outbound-distill.js')
+  const text = 'x'.repeat(4000)              // ~1120 est tokens as non-CJK text
+  const reasoning = 'y'.repeat(4000)         // chain-of-thought, same length
+  const args = '{"path":"' + 'z'.repeat(2000) + '"}'
+  const toolCallMsg = {
+    role: 'assistant',
+    content: [
+      { type: 'text', text },
+      { type: 'reasoning', text: reasoning },
+      { type: 'tool-call', id: 'c1', name: 'fs_read', arguments: args },
+    ],
+  }
+  const finalAnswerMsg = { role: 'assistant', content: [{ type: 'text', text }, { type: 'reasoning', text: reasoning }] }
+  const plainMsg = { role: 'assistant', content: [{ type: 'text', text }] }
+  const toolResultMsg = { role: 'user', content: [{ type: 'tool-result', toolCallId: 'c2', content: [{ type: 'text', text }] }] }
+  const toolCallTok = estimateMessagesTokens([toolCallMsg], 1)
+  const finalTok = estimateMessagesTokens([finalAnswerMsg], 1)
+  const plainTok = estimateMessagesTokens([plainMsg], 1)
+  const toolResultTok = estimateMessagesTokens([toolResultMsg], 1)
+  assert(toolCallTok > plainTok * 2, `16a: tool-call turn bills reasoning + arguments (${toolCallTok} > ${plainTok * 2})`)
+  assert(finalTok < plainTok * 1.5, `16b: final-answer reasoning is NOT billed (adapter strips it; ${finalTok} vs ${plainTok})`)
+  assert(toolResultTok >= plainTok, `16c: tool-result content still counted (${toolResultTok})`)
 }
 
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURES`)

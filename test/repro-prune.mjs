@@ -78,7 +78,9 @@ const cfg = {
   pruneKeepRecent: 12,
   pruneMaxSourceChars: 12000,
   pruneMaxSummaryTokens: 2048,
-  pruneRegenEvery: 6,
+  pruneBatchSize: 12,
+  pruneChainMaxBatches: 20,
+  pruneMaxNewBlocks: 3,
   pruneTimeoutMs: 120000,
   pruneNotice: false,
 }
