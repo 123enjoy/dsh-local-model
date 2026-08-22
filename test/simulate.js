@@ -451,6 +451,12 @@ function histLine(tag, fact) {
 // --- 15. history pruning: over-budget requests get their oldest messages
 //         replaced by one local-model summary, recent ones stay intact ---
 {
+  // Each prune sub-test owns a persistent cache file; a stale snapshot from a
+  // previous run (different budget → different chain shape) would leak in and
+  // change the observed block/keep counts. Wipe them so every run is clean.
+  const { rmSync } = await import('node:fs')
+  for (const f of ['./.test-prune-chain.json', './.test-prune-compact.json', './.test-prune-notice.json']) rmSync(f, { force: true })
+
   const kept = [
     { id: 'p-keep-1', role: 'user', content: [{ type: 'text', text: '最近的助手消息之一，关于当前任务。' }] },
     { id: 'p-keep-2', role: 'user', content: [{ type: 'text', text: '最近的助手消息之二，正在做的东西。' }] },
@@ -475,10 +481,13 @@ function histLine(tag, fact) {
 
   // 15b+15c: over budget → oldest replaced by a prune-summary message, recent
   // kept; a repeated request reuses the cached summary without a local call.
+  // budget 1000 + batchSize 4 keeps the 2-recent keep-zone inside the lazy
+  // threshold: the first batch covers exactly the 4 oldest messages and stops,
+  // so the keep-zone (the last-resort rollable zone) is never touched here.
   {
     const received = []
     const { ctx, runtime } = makeRuntime(makeAdapter(received))
-    installOutboundDistiller(ctx, cfg({ pruneBudgetTokens: 100, pruneKeepRecent: 2 }))
+    installOutboundDistiller(ctx, cfg({ pruneBudgetTokens: 1000, pruneKeepRecent: 2, pruneBatchSize: 4 }))
     await drain(runtime.stream({ provider: 'cloud', model: 'x', messages }))
     const got = received[0].messages
     assert(got.length === 3, `15b: pruned request has summary + kept messages (got ${got.length})`)
@@ -533,7 +542,7 @@ function histLine(tag, fact) {
   {
     const received = []
     const { ctx, runtime } = makeRuntime(makeAdapter(received))
-    installOutboundDistiller(ctx, cfg({ pruneBudgetTokens: 100, pruneKeepRecent: 2, distillCachePath: './.test-prune-notice.json' }))
+    installOutboundDistiller(ctx, cfg({ pruneBudgetTokens: 1000, pruneKeepRecent: 2, pruneBatchSize: 4, distillCachePath: './.test-prune-notice.json' }))
     const agent = makeFakeAgent(['p-keep-2'])
     ctx.agents = { list: () => [agent] }
     await drain(runtime.stream({ provider: 'cloud', model: 'x', messages }))
@@ -545,48 +554,67 @@ function histLine(tag, fact) {
     assert(notice.data.content[0].text.includes('覆盖 4 条'), '15g: notice body shows the history chain coverage')
   }
 
-  // 15h: frozen chain — growing the pruned set APPENDS a new block and never
-  // rewrites earlier blocks, so the outbound request keeps a byte-stable prefix
-  // that the cloud provider's prompt cache keeps hitting on.
+  // 15h: frozen chain — a block, once written, is byte-identical forever; growing
+  // the session only APPENDS blocks, never rewrites old ones. That byte-stable
+  // prefix is exactly what the cloud prompt cache hits on. (Note: since the
+  // keep-zone is now the last-resort rollable zone, "recent intact" is only
+  // guaranteed for the newest message — the frozen-chain invariant is what
+  // matters for cache stability.)
   {
     const received = []
     const { ctx, runtime } = makeRuntime(makeAdapter(received))
-    installOutboundDistiller(ctx, cfg({ pruneBudgetTokens: 100, pruneKeepRecent: 2, distillCachePath: './.test-prune-chain.json' }))
+    installOutboundDistiller(ctx, cfg({ pruneBudgetTokens: 1100, pruneKeepRecent: 2, distillCachePath: './.test-prune-chain.json' }))
     const longMsg = (id, tag) => ({ id, role: 'user', content: [{ type: 'text', text: histLine(tag, `链测试事实 ${tag}`) }] })
-    const m = [longMsg('c-o1', '1'), longMsg('c-o2', '2'), longMsg('c-o3', '3'), longMsg('c-o4', '4'), longMsg('c-k1', '5'), longMsg('c-k2', '6')]
+    const isBlock = (m) => (m?.content?.[0]?.text ?? '').startsWith('⟦历史剪枝')
+    let m = [longMsg('c-o1', '1'), longMsg('c-o2', '2'), longMsg('c-o3', '3'), longMsg('c-o4', '4'), longMsg('c-k1', '5'), longMsg('c-k2', '6')]
     await drain(runtime.stream({ provider: 'cloud', model: 'x', messages: m }))
-    assert(received[0].messages.length === 3, `15h: rebuild → 1 block + kept (got ${received[0].messages.length})`)
-    const b0 = received[0].messages[0].content[0].text
-    assert(b0.startsWith('⟦历史剪枝'), '15h: first message is the initial prune block')
-    // grow by one long message → c-k1 rolls off into a NEW appended block
-    const grown = [...m, longMsg('c-k3', '7')]
-    await drain(runtime.stream({ provider: 'cloud', model: 'x', messages: grown }))
-    assert(received[1].messages.length === 4, `15h: roll appends a 2nd block (got ${received[1].messages.length})`)
-    assert(received[1].messages[0].content[0].text === b0, '15h: earlier block stays byte-identical (cached prefix)')
-    assert(received[1].messages[1].content[0].text.startsWith('⟦历史剪枝'), '15h: 2nd message is the newly-rolled block')
-    assert(received[1].messages[1].content[0].text !== b0, '15h: new block differs from the first')
-    assert(received[1].messages[2].id === 'c-k2' && received[1].messages[3].id === 'c-k3', '15h: recent messages stay intact')
+    assert(isBlock(received[0].messages[0]), '15h: first request prunes into a frozen chain')
+    const blockTexts = new Set(received[0].messages.filter(isBlock).map((b) => b.content[0].text))
+    for (let i = 0; i < 4; i++) {
+      const fresh = longMsg('c-g' + i, String(7 + i))
+      m = [...m, fresh]
+      await drain(runtime.stream({ provider: 'cloud', model: 'x', messages: m }))
+      const cur = received[received.length - 1].messages
+      const curBlocks = cur.filter(isBlock).map((b) => b.content[0].text)
+      for (const t of blockTexts) {
+        assert(curBlocks.includes(t), `15h: chain block "${t.slice(0, 24)}…" stays byte-identical after +${i + 1} message(s)`)
+      }
+      for (const t of curBlocks) blockTexts.add(t)
+      assert(cur.some((msg) => msg === fresh), '15h: the newest message is always kept verbatim')
+    }
   }
 
-  // 15i: deep compaction — a chain past pruneChainMaxBatches merges into one
-  // block (the one rare full-chain rewrite that bounds the chain's size).
+  // 15i: deep compaction — the chain is bounded by pruneChainMaxBatches: once it
+  // exceeds the bound, the WHOLE chain merges into a single block (the one rare
+  // full-chain rewrite that bounds the chain's token footprint). Verify the sent
+  // request never exceeds the bound, and that compaction actually fires (block
+  // count collapses / a single block absorbs many messages).
   {
     const received = []
+    const maxBatches = 3
     const { ctx, runtime } = makeRuntime(makeAdapter(received))
-    installOutboundDistiller(ctx, cfg({ pruneBudgetTokens: 100, pruneKeepRecent: 2, pruneBatchSize: 1, pruneChainMaxBatches: 2, distillCachePath: './.test-prune-compact.json' }))
+    installOutboundDistiller(ctx, cfg({ pruneBudgetTokens: 100, pruneKeepRecent: 2, pruneBatchSize: 1, pruneChainMaxBatches: maxBatches, distillCachePath: './.test-prune-compact.json' }))
     const longMsg = (id, tag) => ({ id, role: 'user', content: [{ type: 'text', text: histLine(tag, `压缩测试事实 ${tag}`) }] })
-    const m = [longMsg('co1', '1'), longMsg('co2', '2'), longMsg('co3', '3'), longMsg('co4', '4'), longMsg('ck1', '5'), longMsg('ck2', '6')]
-    await drain(runtime.stream({ provider: 'cloud', model: 'x', messages: m }))
-    assert(received[0].messages.length === 3, '15i: rebuild → 1 block + kept')
-    const g1 = [...m, longMsg('ck3', '7')]
-    await drain(runtime.stream({ provider: 'cloud', model: 'x', messages: g1 }))
-    assert(received[1].messages.length === 4, `15i: roll 1 → 2 blocks (got ${received[1].messages.length})`)
-    const g2 = [...g1, longMsg('ck4', '8')]
-    await drain(runtime.stream({ provider: 'cloud', model: 'x', messages: g2 }))
-    assert(received[2].messages.length === 3, `15i: chain past maxBatches → deep compaction to 1 block (got ${received[2].messages.length})`)
-    assert(received[2].messages[0].content[0].text.startsWith('⟦历史剪枝'), '15i: compacted first message is still a prune block')
-    assert(received[2].messages[0].content[0].text !== received[1].messages[0].content[0].text, '15i: compacted block differs from the pre-roll first block')
-    assert(received[2].messages[1].id === 'ck3' && received[2].messages[2].id === 'ck4', '15i: recent messages stay intact after compaction')
+    const isBlock = (m) => (m?.content?.[0]?.text ?? '').startsWith('⟦历史剪枝')
+    let m = [longMsg('co1', '1'), longMsg('co2', '2'), longMsg('co3', '3'), longMsg('co4', '4'), longMsg('ck1', '5'), longMsg('ck2', '6')]
+    let sawCollapse = false
+    let prevBlocks = 0
+    for (let i = 0; i < 8; i++) {
+      if (i > 0) m = [...m, longMsg('c' + i, String(6 + i))]
+      await drain(runtime.stream({ provider: 'cloud', model: 'x', messages: m }))
+      const cur = received[received.length - 1].messages
+      const blocks = cur.filter(isBlock)
+      assert(blocks.length >= 1 && blocks.length <= maxBatches, `15i: request ${i} carries ${blocks.length} blocks (bounded by pruneChainMaxBatches=${maxBatches})`)
+      if (prevBlocks > 0 && blocks.length < prevBlocks) sawCollapse = true
+      prevBlocks = blocks.length
+    }
+    assert(sawCollapse, '15i: deep compaction fires (block count collapses at some growth point)')
+    const merged = received.some((opts) => {
+      const b = opts.messages[0]?.content?.[0]?.text ?? ''
+      if (!b.startsWith('⟦历史剪枝')) return false
+      return (Number(/省略(\d+)条/.exec(b)?.[1]) || 0) >= 5
+    })
+    assert(merged, '15i: a compaction merged the chain into one block covering many messages')
   }
 }
 

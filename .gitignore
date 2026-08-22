@@ -16,6 +16,7 @@ test/cache/
 .test-prune-chain.json
 .test-prune-compact.json
 .test-prune-notice.json
+.test-compact-stability.json
 
 # OS
 .DS_Store
